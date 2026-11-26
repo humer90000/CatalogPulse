@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "catalogpulse"
+version = "0.1.0"
+description = "HTTP catalogue crawler. One YAML file per shop, with SQLite price and stock history."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "selectolax>=0.3.21",
+    "PyYAML>=6",
+    "openpyxl>=3.1",
+]
+
+[project.scripts]
+catalogpulse = "catalogpulse.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["catalogpulse*"]

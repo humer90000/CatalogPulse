@@ -1,0 +1,33 @@
+# Listing pages only. This host's robots.txt disallows /test-sites/product/.
+name: laptops
+start_url: https://webscraper.io/test-sites/e-commerce/static/computers/laptops
+item: div.card.thumbnail
+key: url
+category: Laptops
+currency: USD
+price_change_pct: 1
+concurrency: 6
+timeout: 25
+retries: 3
+delay: [0.05, 0.15]
+jsonld: true
+
+pagination:
+  # The pager is windowed (1..10, then an ellipsis). Later pages reveal the rest.
+  page_links: ul.pagination a.page-link
+
+fields:
+  title:
+    selector: a.title
+    attr: title
+  url:
+    selector: a.title
+    attr: href
+  price: span[itemprop="price"]
+  image:
+    selector: img
+    attr: src
+  description: p.description
+  rating:
+    selector: p[data-rating]
+    attr: data-rating

@@ -1,0 +1,40 @@
+name: books
+start_url: https://books.toscrape.com/catalogue/page-1.html
+item: article.product_pod
+key: url
+category: Books
+price_change_pct: 0
+concurrency: 10
+timeout: 25
+retries: 3
+delay: [0.0, 0.04]
+jsonld: false
+
+pagination:
+  # "Page 1 of 50" sits in the pager. The template then fetches the rest at once.
+  page_count: ul.pager li.current
+  url_template: https://books.toscrape.com/catalogue/page-{page}.html
+  next: ul.pager li.next a
+
+fields:
+  title:
+    selector: h3 a
+    attr: title
+  url:
+    selector: h3 a
+    attr: href
+  price: p.price_color
+  stock: p.availability
+  image:
+    selector: img.thumbnail
+    attr: src
+  # The stars are a class name (star-rating Three), not text.
+  rating:
+    selector: p.star-rating
+    attr: class
+    map:
+      One: "1"
+      Two: "2"
+      Three: "3"
+      Four: "4"
+      Five: "5"
