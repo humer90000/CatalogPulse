@@ -2,9 +2,9 @@
 
 Pulls a catalogue over HTTP and keeps every snapshot in SQLite. The next run prints what the price and the stock did. JSON, CSV and xlsx come out of the same database.
 
-httpx fetches the pages, selectolax reads the cards. No browser. On this laptop, books.toscrape.com was 50 pages, 1000 books, 3.1s. `sites/laptops.yaml` is the awkward one: the pager only shows a window of page numbers, so the rest appear after those pages are opened (20 pages, 117 laptops).
+It fits a shop where the product cards are already in the HTML: a repeating block, a price, a link, and a way onto the next page. httpx fetches the pages, selectolax reads the cards. No browser. A new shop is a yaml file, not a new script. You set the card selector, the fields you care about, how a card is recognised next time, and which pager the site actually uses. Extra fields you add are stored and exported as their own columns.
 
-A shop that paints the products with JavaScript, or hides them behind a login, will come back empty. robots.txt is followed unless the yaml says `obey_robots: false`. A new shop is a yaml file.
+A shop that draws the grid with JavaScript, or hides it behind a login, comes back empty. robots.txt is followed unless the yaml says `obey_robots: false`.
 
 ## Setup
 
