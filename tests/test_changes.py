@@ -1,6 +1,6 @@
 import unittest
 
-from catalogpulse.changes import Snap, diff, render
+from catalogpulse.save import Snap, diff, render
 
 
 def snap(key, price, stock=1, title=None):

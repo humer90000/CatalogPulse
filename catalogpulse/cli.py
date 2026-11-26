@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 from catalogpulse.config import ConfigError, load_site
-from catalogpulse.run import CrawlError, execute, materialize
-from catalogpulse.store import Store
+from catalogpulse.crawl import CrawlError, execute, report_run
+from catalogpulse.save import Store
 
 log = logging.getLogger("catalogpulse")
 
@@ -91,7 +91,7 @@ def _run(args) -> int:
 def _show(args) -> int:
     store = Store(Path(args.db))
     try:
-        text = materialize(store, args.site, None, set())
+        text = report_run(store, args.site, None, set())
     finally:
         store.close()
     say(text)
@@ -101,7 +101,7 @@ def _show(args) -> int:
 def _export(args) -> int:
     store = Store(Path(args.db))
     try:
-        text = materialize(store, args.site, Path(args.out), set(args.format))
+        text = report_run(store, args.site, Path(args.out), set(args.format))
     finally:
         store.close()
     say(text)

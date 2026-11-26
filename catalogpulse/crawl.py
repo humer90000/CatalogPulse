@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.robotparser import RobotFileParser
 
 import httpx
 
-from catalogpulse.changes import diff, render, snap_of
 from catalogpulse.config import ConfigError, Site
-from catalogpulse.export import write_outputs
-from catalogpulse.fetch import FetchError, Fetcher, allowed
 from catalogpulse.parse import (
     Item,
     canonical_listing,
@@ -21,13 +22,127 @@ from catalogpulse.parse import (
     parse_listing,
     read_page_total,
 )
-from catalogpulse.store import Store, utcnow
+from catalogpulse.save import Store, diff, render, snap_of, utcnow, write_outputs
 
 log = logging.getLogger("catalogpulse")
+
+# Practice catalogues don't check the TLS fingerprint. Three real UAs are plenty.
+_UAS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
+)
+
+_RETRY = {429, 500, 502, 503, 504}
+
+
+class FetchError(Exception):
+    pass
 
 
 class CrawlError(Exception):
     pass
+
+
+class Fetcher:
+    def __init__(self, client: httpx.AsyncClient, site: Site):
+        self.client = client
+        self.site = site
+
+    async def text(self, url: str) -> str:
+        last = "no response"
+        for attempt in range(self.site.retries):
+            await self._pause()
+            try:
+                response = await self.client.get(url, headers=self._headers())
+            except httpx.TransportError as exc:
+                last = str(exc).splitlines()[0][:180]
+                await asyncio.sleep(0.4 * (attempt + 1))
+                continue
+            if response.status_code in _RETRY:
+                last = f"HTTP {response.status_code}"
+                wait = _retry_wait(response) or 0.5 * (attempt + 1)
+                await asyncio.sleep(min(wait, 15))
+                continue
+            if response.status_code >= 400:
+                raise FetchError(f"HTTP {response.status_code} for {url}")
+            return response.text
+        raise FetchError(f"{url} failed after {self.site.retries} tries ({last})")
+
+    async def many(self, urls: list[str]) -> list[tuple[str, str | None, str | None]]:
+        total = len(urls)
+        if not total:
+            return []
+        done = 0
+        lock = asyncio.Lock()
+        sem = asyncio.Semaphore(self.site.concurrency)
+
+        async def one(url: str):
+            nonlocal done
+            async with sem:
+                try:
+                    html = await self.text(url)
+                    err = None
+                except FetchError as exc:
+                    html = None
+                    err = str(exc)
+            async with lock:
+                done += 1
+                if done == total or done % 10 == 0:
+                    log.info("%s  fetched %s/%s", self.site.name, done, total)
+            return url, html, err
+
+        return list(await asyncio.gather(*(one(url) for url in urls)))
+
+    async def robots(self):
+        if not self.site.obey_robots:
+            return None
+        parts = urlsplit(self.site.start_url)
+        url = f"{parts.scheme}://{parts.netloc}/robots.txt"
+        try:
+            response = await self.client.get(url, headers={"User-Agent": _UAS[0]})
+        except httpx.HTTPError as exc:
+            log.warning("%s  robots.txt skipped (%s)", self.site.name, exc.__class__.__name__)
+            return None
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            log.warning("%s  robots.txt HTTP %s", self.site.name, response.status_code)
+            return None
+        parser = RobotFileParser()
+        parser.parse(response.text.splitlines())
+        return parser
+
+    async def _pause(self) -> None:
+        lo, hi = self.site.delay
+        if hi <= 0:
+            return
+        await asyncio.sleep(random.uniform(lo, hi))
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "User-Agent": random.choice(_UAS),
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.8",
+        }
+        headers.update(self.site.headers)
+        return headers
+
+
+def allowed(parser: RobotFileParser | None, url: str) -> bool:
+    if parser is None:
+        return True
+    return parser.can_fetch(_UAS[0], url)
+
+
+def _retry_wait(response: httpx.Response) -> float | None:
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -59,7 +174,7 @@ async def crawl(site: Site) -> Crawl:
         preview = parse_listing(first_html, site.start_url, site)
         log.info("%s  %s  %s cards", site.name, site.start_url, len(preview))
         if not preview:
-            return Crawl(items={}, pages=1, complete=False, elapsed=_elapsed(started))
+            return Crawl(items={}, pages=1, complete=False, elapsed=time.perf_counter() - started)
 
         pages: list[tuple[str, str]] = [(site.start_url, first_html)]
         seen = {canonical_listing(site.start_url)}
@@ -78,7 +193,7 @@ async def crawl(site: Site) -> Crawl:
                 log.info("%s  stopped at %s pages", site.name, cap)
             else:
                 log.info("%s  pager says %s pages", site.name, total)
-            queued, blocked = _allowed(queued, seen, robots, site)
+            queued, blocked = _keep(queued, seen, robots, site)
             if blocked:
                 complete = False
             if queued:
@@ -86,7 +201,7 @@ async def crawl(site: Site) -> Crawl:
                 if len(got) != len(queued):
                     complete = False
         elif pager_selectors(site):
-            complete = await _waves(fetcher, site, robots, pages, seen, failed)
+            complete = await _follow(fetcher, site, robots, pages, seen, failed)
         else:
             log.info("%s  single page", site.name)
 
@@ -105,7 +220,7 @@ async def crawl(site: Site) -> Crawl:
         pages=len(pages),
         failed=failed,
         complete=complete and not failed,
-        elapsed=_elapsed(started),
+        elapsed=time.perf_counter() - started,
     )
 
 
@@ -127,13 +242,13 @@ async def execute(site: Site, db_path: Path, export_dir: Path, formats: set[str]
             threshold=site.price_change_pct,
             complete=result.complete,
         )
-        text = materialize(store, site.name, export_dir, formats)
+        text = report_run(store, site.name, export_dir, formats)
     finally:
         store.close()
     return 0, text
 
 
-def materialize(store: Store, site: str, export_dir: Path | None, formats: set[str]) -> str:
+def report_run(store: Store, site: str, export_dir: Path | None, formats: set[str]) -> str:
     run, items, previous = store.history(site)
     if run is None:
         raise ConfigError(f"no runs stored for {site}")
@@ -171,7 +286,7 @@ def materialize(store: Store, site: str, export_dir: Path | None, formats: set[s
     return text
 
 
-async def _waves(fetcher, site: Site, robots, pages, seen: set[str], failed: list[str]) -> bool:
+async def _follow(fetcher, site: Site, robots, pages, seen: set[str], failed: list[str]) -> bool:
     selectors = pager_selectors(site)
     pending = _fresh(linked_pages(pages[0][1], pages[0][0], selectors), seen)
     if not pending:
@@ -185,7 +300,7 @@ async def _waves(fetcher, site: Site, robots, pages, seen: set[str], failed: lis
         if len(pending) > room:
             pending = pending[:room]
             complete = False
-        queued, blocked = _allowed(pending, seen, robots, site)
+        queued, blocked = _keep(pending, seen, robots, site)
         if blocked:
             complete = False
         if not queued:
@@ -206,19 +321,12 @@ async def _waves(fetcher, site: Site, robots, pages, seen: set[str], failed: lis
     return complete
 
 
-async def _take(
-    fetcher: Fetcher,
-    urls: list[str],
-    pages: list[tuple[str, str]],
-    seen: set[str],
-    failed: list[str],
-) -> list[tuple[str, str]]:
-    got: list[tuple[str, str]] = []
+async def _take(fetcher: Fetcher, urls, pages, seen: set[str], failed: list[str]):
+    got = []
     batch = await fetcher.many(urls)
     for url, html, err in batch:
         key = canonical_listing(url)
         if err or html is None:
-            # Remember the miss so the next pager wave doesn't queue it again.
             seen.add(key)
             failed.append(url)
             log.warning("%s  %s", fetcher.site.name, err or url)
@@ -234,14 +342,13 @@ async def _take(
 def _fresh(urls: list[str], seen: set[str]) -> list[str]:
     fresh = []
     for url in urls:
-        key = canonical_listing(url)
-        if key in seen:
+        if canonical_listing(url) in seen:
             continue
         fresh.append(url)
     return fresh
 
 
-def _allowed(urls: list[str], seen: set[str], robots, site: Site) -> tuple[list[str], int]:
+def _keep(urls, seen, robots, site: Site):
     kept = []
     blocked = 0
     local = set(seen)
@@ -264,7 +371,3 @@ def _rel(path: Path) -> str:
         return str(path.resolve().relative_to(Path.cwd().resolve()))
     except ValueError:
         return str(path)
-
-
-def _elapsed(started: float) -> float:
-    return time.perf_counter() - started

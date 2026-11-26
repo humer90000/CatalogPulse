@@ -2,10 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from catalogpulse.changes import diff, snap_of
-from catalogpulse.export import write_outputs
 from catalogpulse.parse import Item
-from catalogpulse.store import Store
+from catalogpulse.save import Store, diff, snap_of, write_outputs
 
 
 def item(key, price, stock=1):
